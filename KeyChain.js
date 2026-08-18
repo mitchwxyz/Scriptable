@@ -30,5 +30,6 @@ async function getOrPromptKey(key) {
   return null;
 }
 
-const apiKey = await getOrPromptKey("PLAYRUN_TOKEN");
+// Run it
+const apiKey = await getOrPromptKey("SECRET_KEY");
 console.log("Active Key:");
