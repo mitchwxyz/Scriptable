@@ -1,3 +1,4 @@
+
 // PlayrunSync — Scriptable iOS
 // Push the Next Up PocketCasts Episode to PlayRun. Clear all others from PlayRun.
 const POCKETCASTS_TOKEN = Keychain.get("POCKETCASTS_TOKEN");
@@ -21,6 +22,7 @@ async function requestJSON(url, method, token, body) {
     return data;
 }
 
+// TODO Handle empty playlist
 async function getPocketCastsPlaylist() {
     const data = await requestJSON(
         "https://api.pocketcasts.com/up_next/list",
@@ -69,7 +71,15 @@ async function insertPlayRunPlaylist(podcastUuid, episodeUuid) {
         "https://www.playrun.app/api/playlist/subscribe",
         "POST",
         PLAYRUN_TOKEN,
-        { episode: { uuid: episodeUuid, podcast_uuid: podcastUuid } },
+        {
+          episode: {
+            uuid: episodeUuid,
+            podcast: {
+              uuid: podcastUuid
+            },
+            podcast_uuid: podcastUuid
+          }
+        },
     );
     console.log("Success: Insert Episode");
     return data;
@@ -91,7 +101,13 @@ async function main() {
     const pocketCastsPlaylist = await getPocketCastsPlaylist();
 
     // 2. Parse and Get Episode(s)
-    const pocketCastsEpisodeUuid = pocketCastsPlaylist.order[1];
+    let pocketCastsEpisodeUuid
+    if (pocketCastsPlaylist.order.length < 2) {
+        throw new Error("No Up-Next Podcast")
+    } else {
+        pocketCastsEpisodeUuid = pocketCastsPlaylist.order[1];  //Next Up
+    }
+
     const pocketCastsEpisodeDetails = await getPocketCastsEpisodeDetails(
         pocketCastsEpisodeUuid,
     );
@@ -123,8 +139,8 @@ async function main() {
 
     // 4. Insert into PlayRun
     const playRunPlaylist = await insertPlayRunPlaylist(
-        matchingPlayRunEpisodes[0].podcast.uuid,
-        playRunEpisodeUuid,
+        playRunPodcastUuid,
+        playRunEpisodeUuid
     );
     let removedEpisodeCount = 0;
 
