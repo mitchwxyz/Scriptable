@@ -1,0 +1,6 @@
+# MacOS
+.DS_STORE
+
+# Script Files
+course.json
+*.bak
