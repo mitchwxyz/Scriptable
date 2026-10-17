@@ -380,12 +380,12 @@ button:active:not(:disabled) { opacity: .75; }
   box-shadow: var(--shadow);
 }
 .player-meta { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
-.status-line { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.status-line { display: flex; flex: 1; align-items: center; gap: 7px; min-width: 0; }
 .status-dot { flex: 0 0 5px; height: 5px; border-radius: 50%; background: var(--muted); }
 .player[data-state="pause"] .status-dot { background: var(--accent); }
 .player[data-state="stopped"] .status-dot { background: #e36c63; }
-#status { color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
-#position { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+#status { min-width: 0; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#position { flex-shrink: 0; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 #progress {
   display: block;
   width: 100%;
