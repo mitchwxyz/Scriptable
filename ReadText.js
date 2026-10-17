@@ -7,7 +7,6 @@ const SETTINGS = {
   model: "elevenlabs/eleven-v4-turbo",
   voice: "george",
   chunkCharacters: 2000,
-  sampleRate: 24000,
   timeoutSeconds: 30,
   keychainName: "OPENROUTER_TTS_KEY",
 };
@@ -211,7 +210,6 @@ function playerHTML(chunks) {
   const transcript = chunks.map(text => "<p>" + escapeHTML(text) + "</p>").join("");
   const payload = JSON.stringify({
     chunks,
-    sampleRate: SETTINGS.sampleRate,
   }).replace(/</g, "\\u003c");
 
   return `<!doctype html>
@@ -344,7 +342,7 @@ try {
 }
 
 // Runs inside the WebView. Keep this function independent of Scriptable globals.
-function browserPlayer({ chunks, sampleRate }) {
+function browserPlayer({ chunks }) {
   const button = document.getElementById("toggle");
   const status = document.getElementById("status");
   const reader = document.getElementById("reader");
@@ -513,11 +511,7 @@ function browserPlayer({ chunks, sampleRate }) {
   function ensureContext() {
     if (context) return;
     const Audio = window.AudioContext || window.webkitAudioContext;
-    try {
-      context = new Audio({ sampleRate });
-    } catch (_) {
-      context = new Audio();
-    }
+    context = new Audio();
   }
 
   function startTimer() {
