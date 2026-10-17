@@ -511,6 +511,7 @@ button:active:not(:disabled) { opacity: .75; }
 </header>
 <div class="reading-heading"><strong>TRANSCRIPT</strong><span>Tap a word to jump</span></div>
 <main id="reader" aria-label="Transcript. Tap a word to jump to its approximate audio position.">${transcript}</main>
+<audio id="audio" hidden preload="auto" playsinline></audio>
 <footer class="player-shell">
   <section id="player" class="player" data-state="play" aria-label="Audio player">
     <div class="player-meta">
@@ -561,7 +562,7 @@ function browserPlayer({ chunks }) {
   const progress = document.getElementById("progress");
   const position = document.getElementById("position");
   const PREFETCH_CHUNKS = 3;
-  const DECODED_CACHE_CHUNKS = 6;
+  const AUDIO_CACHE_CHUNKS = 6;
   const MIN_SPEED_STEPS = 5;
   const MAX_SPEED_STEPS = 30;
   let totalCharacters = 0;
@@ -632,79 +633,146 @@ function browserPlayer({ chunks }) {
     return entries;
   });
 
-  let context;
+  let audio;
+  let unlocked = false;
+  let unlocking;
   let wanted = false;
   let started = false;
   let busy = false;
   let stopped = false;
   let finished = false;
-  let scheduled = 0;
+  let ready = false;
+  let buffering = true;
   let playing = 0;
-  let tail = 0;
-  let highlighted;
+  let pendingFraction = 0;
+  let activeURL;
   let inFlight = false;
   let requestToken = 0;
   let seekVersion = 0;
-  let pendingSeek;
+  let highlighted;
   let timer;
-  // Store tenths as integers so repeated taps always change speed by exactly 0.1.
+  // API-generated speech is the 1.0× baseline. Keep UI steps as integer tenths.
   let speedSteps = 10;
+  const clips = new Map();
 
-  const buffers = new Map();
-  const timeline = [];
+  function applySpeed() {
+    if (!audio) return;
+    // Native time stretching keeps the voice's pitch as playback speed changes.
+    audio.preservesPitch = true;
+    if ("webkitPreservesPitch" in audio) audio.webkitPreservesPitch = true;
+    audio.defaultPlaybackRate = speedSteps / 10;
+    audio.playbackRate = speedSteps / 10;
+  }
+
+  function ensureAudio() {
+    if (audio) return;
+    audio = document.getElementById("audio");
+    if (!("preservesPitch" in audio) && !("webkitPreservesPitch" in audio)) {
+      throw new Error("Pitch-preserving playback requires a newer version of iOS.");
+    }
+    applySpeed();
+    audio.onloadedmetadata = () => {
+      if (stopped || !activeURL || audio.currentSrc !== activeURL || audio.readyState < 1) return;
+      if (!Number.isFinite(audio.duration) || audio.duration <= 0) {
+        fail("The API returned empty audio.");
+        return;
+      }
+      audio.currentTime = pendingFraction * audio.duration;
+      ready = true;
+      applySpeed();
+      update();
+    };
+    audio.onplaying = () => {
+      if (stopped || !activeURL) return;
+      buffering = false;
+      update();
+    };
+    audio.onwaiting = () => {
+      if (stopped || !activeURL) return;
+      buffering = true;
+      update();
+    };
+    audio.ontimeupdate = update;
+    audio.onerror = () => {
+      if (!stopped && activeURL && audio.error) {
+        fail(audio.error.message || "The audio could not be loaded.");
+      }
+    };
+    audio.onended = () => {
+      if (stopped || !ready || !activeURL || !audio.ended) return;
+      if (playing === chunks.length - 1) {
+        finished = true;
+        wanted = false;
+        audio.pause();
+        clearInterval(timer);
+        timer = null;
+        setPlayLabel("Replay");
+        setProgress(playing, chunks[playing].length);
+        setStatus("Finished reading.");
+      } else {
+        resetPosition(playing + 1, 0);
+        loadCurrent();
+        fetchNext();
+        update();
+      }
+    };
+  }
+
+  async function unlockAudio() {
+    ensureAudio();
+    if (unlocked) return;
+    if (!unlocking) {
+      // Prime this same element during the tap so asynchronous TTS and later
+      // chunks retain iOS's per-element playback permission.
+      audio.src = "data:audio/wav;base64,UklGRmQBAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YUABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
+      unlocking = Promise.resolve(audio.play()).then(() => {
+        if (stopped) return;
+        audio.pause();
+        unlocked = true;
+      }).finally(() => { unlocking = null; });
+    }
+    await unlocking;
+  }
 
   function fetchNext() {
     if (!started || stopped || finished || inFlight) return;
     const limit = Math.min(chunks.length, playing + PREFETCH_CHUNKS);
-    for (let index = scheduled; index < limit; index++) {
-      if (buffers.has(index)) continue;
+    for (let index = playing; index < limit; index++) {
+      if (clips.has(index)) continue;
       inFlight = true;
       window.location.href = "reader://chunk/" + index + "/" + (++requestToken);
       return;
     }
   }
 
-  function scheduleBuffer(index, buffer, start, offset = 0) {
-    const source = context.createBufferSource();
-    const rate = speedSteps / 10;
-    source.buffer = buffer;
-    source.playbackRate.value = rate;
-    source.connect(context.destination);
-
-    const segment = {
-      i: index, buffer, source, start, rate, offset,
-      end: start + (buffer.duration - offset) / rate,
-    };
-    timeline.push(segment);
-    source.onended = () => source.disconnect();
-    source.start(start, offset);
-    tail = segment.end;
+  function playCurrent() {
+    if (stopped || !wanted || !activeURL) return;
+    const version = seekVersion;
+    const url = activeURL;
+    Promise.resolve(audio.play()).catch(error => {
+      if (
+        stopped || !wanted || version !== seekVersion || activeURL !== url ||
+        error.name === "AbortError"
+      ) return;
+      fail("Playback error: " + String(error.message || error));
+    });
   }
 
-  function schedule() {
-    while (
-      !stopped && !finished && context && buffers.has(scheduled) &&
-      scheduled < Math.min(chunks.length, playing + PREFETCH_CHUNKS)
-    ) {
-      const buffer = buffers.get(scheduled);
-      // Refresh the decoded cache's insertion order for recent passages.
-      buffers.delete(scheduled);
-      buffers.set(scheduled, buffer);
-      const start = Math.max(tail, context.currentTime + 0.06);
-      const offset = pendingSeek && pendingSeek.index === scheduled
-        ? pendingSeek.fraction * buffer.duration : 0;
-      scheduleBuffer(scheduled++, buffer, start, offset);
-      pendingSeek = null;
+  function loadCurrent() {
+    if (stopped || finished || !unlocked) return;
+    const url = clips.get(playing);
+    if (!url) return;
+    clips.delete(playing);
+    clips.set(playing, url);
+    if (activeURL !== url) {
+      ready = false;
+      buffering = true;
+      activeURL = url;
+      audio.src = url;
+      audio.load();
+      applySpeed();
     }
-  }
-
-  function advanceTimeline(now) {
-    // Advance even if a timer tick missed entire chunks of playback.
-    while (timeline.length && now >= timeline[0].end) {
-      playing = Math.min(timeline[0].i + 1, chunks.length - 1);
-      timeline.shift();
-      setProgress(playing, 0);
-    }
+    if (wanted) playCurrent();
   }
 
   function updateSpeedControls() {
@@ -719,35 +787,9 @@ function browserPlayer({ chunks }) {
       MIN_SPEED_STEPS, Math.min(MAX_SPEED_STEPS, speedSteps + delta)
     );
     if (nextSteps === speedSteps) return;
-
     try {
       speedSteps = nextSteps;
-      if (context) {
-        const now = context.currentTime;
-        const rate = speedSteps / 10;
-        advanceTimeline(now);
-        const current = timeline[0];
-        const active = current && now >= current.start;
-        const pending = timeline.splice(active ? 1 : 0);
-
-        if (active) {
-          // Keep the current source playing from its exact position.
-          current.offset += (now - current.start) * current.rate;
-          current.start = now;
-          current.rate = rate;
-          current.end = now + (current.buffer.duration - current.offset) / rate;
-          current.source.playbackRate.setValueAtTime(rate, now);
-          tail = current.end;
-        } else {
-          tail = Math.max(now, pending.length ? pending[0].start : now);
-        }
-
-        // Future sources have fixed start times: replace them at the new boundaries.
-        for (const segment of pending) segment.source.stop();
-        for (const segment of pending) {
-          scheduleBuffer(segment.i, segment.buffer, tail, segment.offset);
-        }
-      }
+      applySpeed();
       updateSpeedControls();
       update();
     } catch (error) {
@@ -759,23 +801,8 @@ function browserPlayer({ chunks }) {
   faster.onclick = () => changeSpeed(1);
   updateSpeedControls();
 
-  function ensureContext() {
-    if (context) return;
-    const Audio = window.AudioContext || window.webkitAudioContext;
-    context = new Audio();
-  }
-
   function startTimer() {
     if (!timer) timer = setInterval(update, 100);
-  }
-
-  function clearTimeline() {
-    for (const segment of timeline) {
-      segment.source.onended = null;
-      segment.source.stop();
-      segment.source.disconnect();
-    }
-    timeline.length = 0;
   }
 
   function highlight(entry) {
@@ -786,38 +813,46 @@ function browserPlayer({ chunks }) {
   }
 
   function resetPosition(index, character) {
-    clearTimeline();
-    // Invalidate responses from the previous position, including pending decoding.
+    const fraction = character / chunks[index].length;
+    const reuse = ready && playing === index && activeURL === clips.get(index);
+    if (unlocked) audio.pause();
+    seekVersion++;
     requestToken++;
     inFlight = false;
     finished = false;
-    scheduled = playing = index;
-    tail = context.currentTime;
-    pendingSeek = { index, fraction: character / chunks[index].length };
+    playing = index;
+    pendingFraction = fraction;
+    if (reuse) {
+      audio.currentTime = fraction * audio.duration;
+    } else {
+      activeURL = null;
+      ready = false;
+      buffering = true;
+    }
     highlight(words[index].find(word => word.end > character));
     setProgress(index, character);
   }
 
   async function seek(index, character) {
     if (stopped) return;
-    const version = ++seekVersion;
+    let version;
     try {
-      ensureContext();
+      ensureAudio();
       const shouldPlay = wanted || !started || finished;
       resetPosition(index, character);
+      version = seekVersion;
       started = true;
       wanted = shouldPlay;
       setPlayLabel(wanted ? "Pause" : "Play");
       button.disabled = false;
-      // Resume within the tap handler to satisfy iOS's user gesture requirement.
-      await (wanted ? context.resume() : context.suspend());
+      if (wanted) await unlockAudio();
       if (stopped || version !== seekVersion) return;
       startTimer();
-      schedule();
+      loadCurrent();
       fetchNext();
       update();
     } catch (error) {
-      if (!stopped && version === seekVersion) fail(error.message);
+      if (!stopped && (version === undefined || version === seekVersion)) fail(error.message);
     }
   }
 
@@ -827,10 +862,16 @@ function browserPlayer({ chunks }) {
     wanted = false;
     clearInterval(timer);
     timer = null;
-    clearTimeline();
-    buffers.clear();
+    if (audio) {
+      audio.pause();
+      audio.onloadedmetadata = audio.onplaying = audio.onwaiting = null;
+      audio.ontimeupdate = audio.onended = audio.onerror = null;
+      audio.removeAttribute("src");
+      audio.load();
+    }
+    for (const url of clips.values()) URL.revokeObjectURL(url);
+    clips.clear();
     updateSpeedControls();
-    if (context) context.close().catch(() => {});
   }
 
   function fail(message, token) {
@@ -843,26 +884,30 @@ function browserPlayer({ chunks }) {
 
   button.onclick = async () => {
     if (busy || stopped) return;
-    const version = seekVersion;
     busy = true;
     button.disabled = true;
-
+    let version = seekVersion;
     try {
-      ensureContext();
-      if (finished) resetPosition(0, 0);
-
+      ensureAudio();
+      if (finished) {
+        resetPosition(0, 0);
+        version = seekVersion;
+      }
       if (wanted) {
         wanted = false;
-        await context.suspend();
+        audio.pause();
       } else {
-        await context.resume();
+        wanted = started = true;
+        await unlockAudio();
         if (stopped || version !== seekVersion) return;
-        started = wanted = true;
         startTimer();
-        schedule();
+        loadCurrent();
         fetchNext();
       }
-      if (!stopped) setPlayLabel(wanted ? "Pause" : "Play");
+      if (!stopped) {
+        setPlayLabel(wanted ? "Pause" : "Play");
+        update();
+      }
     } catch (error) {
       if (!stopped && version === seekVersion) fail(error.message);
     } finally {
@@ -874,70 +919,43 @@ function browserPlayer({ chunks }) {
   window.player = {
     async add(index, base64, token = requestToken) {
       if (stopped || token !== requestToken) return;
-      const binary = atob(base64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-
-      const buffer = await context.decodeAudioData(bytes.buffer);
-      if (stopped || token !== requestToken) return;
-      if (!buffer.length) throw new Error("The API returned empty audio.");
-
-      buffers.set(index, buffer);
-      while (buffers.size > DECODED_CACHE_CHUNKS) {
-        buffers.delete(buffers.keys().next().value);
+      if (!clips.has(index)) {
+        const binary = atob(base64);
+        if (!binary.length) throw new Error("The API returned empty audio.");
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const url = URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" }));
+        clips.set(index, url);
+        while (clips.size > AUDIO_CACHE_CHUNKS) {
+          const oldest = [...clips.keys()].find(key => key !== playing);
+          URL.revokeObjectURL(clips.get(oldest));
+          clips.delete(oldest);
+        }
       }
       inFlight = false;
-      schedule();
+      loadCurrent();
     },
     fail,
     stop,
   };
 
   function update() {
-    if (!context || stopped || finished || !started) return;
-    const now = context.currentTime;
-    advanceTimeline(now);
-    const segment = timeline.length && now >= timeline[0].start ? timeline[0] : null;
-
-    if (segment) {
-      playing = segment.i;
-      // Estimated alignment: the API does not provide word timestamps.
-      const position = segment.offset + (now - segment.start) * segment.rate;
-      const fraction = position / segment.buffer.duration;
+    if (!audio || stopped || finished || !started) return;
+    if (ready) {
+      // Media time already reflects the playback rate.
+      const fraction = Math.min(1, audio.currentTime / audio.duration);
       const character = fraction * chunks[playing].length;
       setProgress(playing, character);
       const entries = words[playing];
-      const entry =
-        entries.find(word => word.end > character) || entries[entries.length - 1];
-
-      highlight(entry);
-
+      highlight(entries.find(word => word.end > character) || entries[entries.length - 1]);
       if (follow.checked && wanted && highlighted) {
         const box = highlighted.getBoundingClientRect();
         const viewport = reader.getBoundingClientRect();
-        const delta = box.top - viewport.top - viewport.height * 0.35;
-        reader.scrollTop += delta * 0.22;
+        reader.scrollTop += (box.top - viewport.top - viewport.height * 0.35) * 0.22;
       }
     }
-
-    schedule();
     fetchNext();
-    if (scheduled === chunks.length && now >= tail) {
-      finished = true;
-      wanted = false;
-      clearInterval(timer);
-      timer = null;
-      context.suspend().catch(() => {});
-      setPlayLabel("Replay");
-      button.disabled = false;
-      setProgress(chunks.length - 1, chunks[chunks.length - 1].length);
-      setStatus("Finished reading.");
-      return;
-    }
-
-    setStatus(wanted ? segment ? "Reading" : "Loading audio…" : "Paused");
+    setStatus(wanted ? ready && !buffering ? "Reading" : "Loading audio…" : "Paused");
   }
 }
 
