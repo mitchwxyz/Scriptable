@@ -607,6 +607,31 @@ function browserPlayer({ chunks }) {
     new ResizeObserver(fitStatus).observe(status);
   }
 
+  // Watch scroll gestures rather than scroll events, which also fire when the
+  // player follows the spoken text or the browser focuses a word.
+  let touchY = null;
+  reader.addEventListener("touchstart", event => {
+    touchY = event.touches.length === 1 ? event.touches[0].clientY : null;
+  }, { passive: true });
+  reader.addEventListener("touchmove", event => {
+    if (event.touches.length !== 1) {
+      touchY = null;
+    } else if (touchY !== null && Math.abs(event.touches[0].clientY - touchY) > 6) {
+      follow.checked = false;
+    }
+  }, { passive: true });
+  const endTouch = () => { touchY = null; };
+  reader.addEventListener("touchend", endTouch, { passive: true });
+  reader.addEventListener("touchcancel", endTouch, { passive: true });
+  reader.addEventListener("wheel", event => {
+    if (!event.ctrlKey && event.deltaY) follow.checked = false;
+  }, { passive: true });
+  reader.addEventListener("keydown", event => {
+    if (!event.defaultPrevented && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+      follow.checked = false;
+    }
+  });
+
   reader.textContent = "";
   const words = chunks.map((text, index) => {
     const paragraph = document.createElement("p");
