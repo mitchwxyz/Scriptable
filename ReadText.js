@@ -123,46 +123,57 @@ async function readText(text, key) {
   const chunks = splitText(text, SETTINGS.chunkCharacters);
   const view = new WebView();
   const requested = new Set();
+  const speechCache = new Map();
   let closed = false;
 
   // The page requests chunks through cancelled navigations; no native polling.
   view.shouldAllowRequest = request => {
     if (!request.url.startsWith("reader://")) return true;
 
-    const match = /^reader:\/\/chunk\/(\d+)$/.exec(request.url);
+    const match = /^reader:\/\/chunk\/(\d+)\/(\d+)$/.exec(request.url);
     const index = match ? Number(match[1]) : -1;
+    const token = match ? Number(match[2]) : -1;
+    const requestID = index + "/" + token;
 
     if (
       !closed && Number.isSafeInteger(index) &&
-      index >= 0 && index < chunks.length && !requested.has(index)
+      index >= 0 && index < chunks.length &&
+      Number.isSafeInteger(token) && token > 0 && !requested.has(requestID)
     ) {
-      requested.add(index);
-      deliver(index);
+      requested.add(requestID);
+      deliver(index, token);
     }
 
     return false;
   };
 
-  async function deliver(index) {
+  async function deliver(index, token) {
     try {
-      const base64 = await speech(chunks[index], key);
+      // Cache compressed audio so seeking back never repeats a successful API call.
+      let pending = speechCache.get(index);
+      if (!pending) {
+        pending = speech(chunks[index], key);
+        speechCache.set(index, pending);
+        pending.catch(() => speechCache.delete(index));
+      }
+      const base64 = await pending;
       if (closed) return;
 
-      // Wait for audio decoding before allowing the page to request more.
-      const result = await view.evaluateJavaScript(`
-        window.player.add(${index}, ${JSON.stringify(base64)}).then(
-          () => completion("ok"),
-          error => completion("Audio error: " + String(error.message || error))
+      // Let the page finish decoding before it requests more. Handle errors there
+      // so rapid seeks never share an asynchronous completion callback.
+      await view.evaluateJavaScript(`
+        window.player.add(${index}, ${JSON.stringify(base64)}, ${token}).catch(
+          error => window.player.fail(
+            "Audio error: " + String(error.message || error), ${token}
+          )
         );
-        null;
-      `, true);
-
-      if (result !== "ok") throw new Error(result);
+        true;
+      `);
     } catch (error) {
       if (closed) return;
       try {
         const message = JSON.stringify(String(error.message || error));
-        await view.evaluateJavaScript(`window.player.fail(${message}); true;`);
+        await view.evaluateJavaScript(`window.player.fail(${message}, ${token}); true;`);
       } catch (_) {
         // The WebView may have been dismissed while the request was in flight.
       }
@@ -174,6 +185,8 @@ async function readText(text, key) {
     await view.present(false);
   } finally {
     closed = true;
+    speechCache.clear();
+    requested.clear();
     try {
       await view.evaluateJavaScript("window.player.stop(); true;");
     } catch (_) {
@@ -258,6 +271,9 @@ label { font-size: 15px; }
 
 .speed-controls button { min-width: 44px; min-height: 44px; padding: 8px 14px; }
 #speed { min-width: 48px; text-align: center; font-variant-numeric: tabular-nums; }
+.hint { margin-top: 10px; font-size: 13px; }
+#reader span { cursor: pointer; touch-action: manipulation; }
+#reader span:focus-visible { outline: 2px solid #285948; outline-offset: 2px; }
 
 #status {
   font-size: 13px;
@@ -303,7 +319,8 @@ p {
     <output id="speed" aria-live="polite" aria-atomic="true">1.0×</output>
     <button id="faster" type="button" aria-label="Increase speed by 0.1">+</button>
   </div>
-  <div id="status" role="status">Tap Play to begin.</div>
+  <div class="hint">Tap a word to jump there. Position is approximate.</div>
+  <div id="status" role="status">Tap Play or a word to begin.</div>
 </header>
 <main id="reader">${transcript}</main>
 <script>
@@ -336,16 +353,28 @@ function browserPlayer({ chunks, sampleRate }) {
   const faster = document.getElementById("faster");
   const speed = document.getElementById("speed");
   const PREFETCH_CHUNKS = 3;
+  const DECODED_CACHE_CHUNKS = 6;
   const MIN_SPEED_STEPS = 5;
   const MAX_SPEED_STEPS = 30;
 
   reader.textContent = "";
-  const words = chunks.map(text => {
+  const words = chunks.map((text, index) => {
     const paragraph = document.createElement("p");
     let end = 0;
     const entries = (text.match(/\S+\s*/g) || []).map(word => {
       const span = document.createElement("span");
+      const start = end;
       span.textContent = word;
+      span.tabIndex = 0;
+      span.setAttribute("role", "button");
+      span.setAttribute("aria-label", "Jump to " + word.trim());
+      span.onclick = () => seek(index, start);
+      span.onkeydown = event => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          seek(index, start);
+        }
+      };
       paragraph.appendChild(span);
       end += word.length;
       return { span, end };
@@ -359,30 +388,35 @@ function browserPlayer({ chunks, sampleRate }) {
   let started = false;
   let busy = false;
   let stopped = false;
-  let fetched = 0;
+  let finished = false;
   let scheduled = 0;
   let playing = 0;
   let tail = 0;
   let highlighted;
   let inFlight = false;
+  let requestToken = 0;
+  let seekVersion = 0;
+  let pendingSeek;
+  let timer;
   // Store tenths as integers so repeated taps always change speed by exactly 0.1.
   let speedSteps = 10;
 
   const buffers = new Map();
+  const loaded = new Set();
   const timeline = [];
 
   function fetchNext() {
-    if (
-      !started || stopped || inFlight || fetched >= chunks.length ||
-      fetched >= playing + PREFETCH_CHUNKS
-    ) {
+    if (!started || stopped || finished || inFlight) return;
+    const limit = Math.min(chunks.length, playing + PREFETCH_CHUNKS);
+    for (let index = scheduled; index < limit; index++) {
+      if (buffers.has(index)) continue;
+      inFlight = true;
+      window.location.href = "reader://chunk/" + index + "/" + (++requestToken);
       return;
     }
-    inFlight = true;
-    window.location.href = "reader://chunk/" + fetched;
   }
 
-  function scheduleBuffer(index, buffer, start) {
+  function scheduleBuffer(index, buffer, start, offset = 0) {
     const source = context.createBufferSource();
     const rate = speedSteps / 10;
     source.buffer = buffer;
@@ -390,21 +424,29 @@ function browserPlayer({ chunks, sampleRate }) {
     source.connect(context.destination);
 
     const segment = {
-      i: index, buffer, source, start, rate, offset: 0,
-      end: start + buffer.duration / rate,
+      i: index, buffer, source, start, rate, offset,
+      end: start + (buffer.duration - offset) / rate,
     };
     timeline.push(segment);
     source.onended = () => source.disconnect();
-    source.start(start);
+    source.start(start, offset);
     tail = segment.end;
   }
 
   function schedule() {
-    while (!stopped && context && buffers.has(scheduled)) {
+    while (
+      !stopped && !finished && context && buffers.has(scheduled) &&
+      scheduled < Math.min(chunks.length, playing + PREFETCH_CHUNKS)
+    ) {
       const buffer = buffers.get(scheduled);
+      // Refresh the decoded cache's insertion order for recent passages.
+      buffers.delete(scheduled);
+      buffers.set(scheduled, buffer);
       const start = Math.max(tail, context.currentTime + 0.06);
-      scheduleBuffer(scheduled, buffer, start);
-      buffers.delete(scheduled++);
+      const offset = pendingSeek && pendingSeek.index === scheduled
+        ? pendingSeek.fraction * buffer.duration : 0;
+      scheduleBuffer(scheduled++, buffer, start, offset);
+      pendingSeek = null;
     }
   }
 
@@ -453,7 +495,9 @@ function browserPlayer({ chunks, sampleRate }) {
 
         // Future sources have fixed start times: replace them at the new boundaries.
         for (const segment of pending) segment.source.stop();
-        for (const segment of pending) scheduleBuffer(segment.i, segment.buffer, tail);
+        for (const segment of pending) {
+          scheduleBuffer(segment.i, segment.buffer, tail, segment.offset);
+        }
       }
       updateSpeedControls();
       update();
@@ -466,18 +510,85 @@ function browserPlayer({ chunks, sampleRate }) {
   faster.onclick = () => changeSpeed(1);
   updateSpeedControls();
 
+  function ensureContext() {
+    if (context) return;
+    const Audio = window.AudioContext || window.webkitAudioContext;
+    try {
+      context = new Audio({ sampleRate });
+    } catch (_) {
+      context = new Audio();
+    }
+  }
+
+  function startTimer() {
+    if (!timer) timer = setInterval(update, 100);
+  }
+
+  function clearTimeline() {
+    for (const segment of timeline) {
+      segment.source.onended = null;
+      segment.source.stop();
+      segment.source.disconnect();
+    }
+    timeline.length = 0;
+  }
+
+  function highlight(entry) {
+    if (!entry || entry.span === highlighted) return;
+    if (highlighted) highlighted.classList.remove("current");
+    highlighted = entry.span;
+    highlighted.classList.add("current");
+  }
+
+  function resetPosition(index, character) {
+    clearTimeline();
+    // Invalidate responses from the previous position, including pending decoding.
+    requestToken++;
+    inFlight = false;
+    finished = false;
+    scheduled = playing = index;
+    tail = context.currentTime;
+    pendingSeek = { index, fraction: character / chunks[index].length };
+    highlight(words[index].find(word => word.end > character));
+  }
+
+  async function seek(index, character) {
+    if (stopped) return;
+    const version = ++seekVersion;
+    try {
+      ensureContext();
+      const shouldPlay = wanted || !started || finished;
+      resetPosition(index, character);
+      started = true;
+      wanted = shouldPlay;
+      button.textContent = wanted ? "Pause" : "Play";
+      button.disabled = false;
+      // Resume within the tap handler to satisfy iOS's user gesture requirement.
+      await (wanted ? context.resume() : context.suspend());
+      if (stopped || version !== seekVersion) return;
+      startTimer();
+      schedule();
+      fetchNext();
+      update();
+    } catch (error) {
+      if (!stopped && version === seekVersion) fail(error.message);
+    }
+  }
+
   function stop() {
     if (stopped) return;
     stopped = true;
     wanted = false;
     clearInterval(timer);
+    timer = null;
+    clearTimeline();
     buffers.clear();
-    timeline.length = 0;
     updateSpeedControls();
     if (context) context.close().catch(() => {});
   }
 
-  function fail(message) {
+  function fail(message, token) {
+    if (token !== undefined && token !== requestToken) return;
     stop();
     button.disabled = true;
     button.textContent = "Stopped";
@@ -486,32 +597,28 @@ function browserPlayer({ chunks, sampleRate }) {
 
   button.onclick = async () => {
     if (busy || stopped) return;
+    const version = seekVersion;
     busy = true;
     button.disabled = true;
 
     try {
-      if (!context) {
-        const Audio = window.AudioContext || window.webkitAudioContext;
-        try {
-          context = new Audio({ sampleRate });
-        } catch (_) {
-          context = new Audio();
-        }
-      }
+      ensureContext();
+      if (finished) resetPosition(0, 0);
 
       if (wanted) {
         wanted = false;
         await context.suspend();
       } else {
         await context.resume();
-        if (stopped) return;
+        if (stopped || version !== seekVersion) return;
         started = wanted = true;
+        startTimer();
         schedule();
         fetchNext();
       }
       if (!stopped) button.textContent = wanted ? "Pause" : "Play";
     } catch (error) {
-      if (!stopped) fail(error.message);
+      if (!stopped && version === seekVersion) fail(error.message);
     } finally {
       busy = false;
       button.disabled = stopped;
@@ -519,8 +626,8 @@ function browserPlayer({ chunks, sampleRate }) {
   };
 
   window.player = {
-    async add(index, base64) {
-      if (stopped) return;
+    async add(index, base64, token = requestToken) {
+      if (stopped || token !== requestToken) return;
       const binary = atob(base64);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) {
@@ -528,11 +635,14 @@ function browserPlayer({ chunks, sampleRate }) {
       }
 
       const buffer = await context.decodeAudioData(bytes.buffer);
-      if (stopped) return;
+      if (stopped || token !== requestToken) return;
       if (!buffer.length) throw new Error("The API returned empty audio.");
 
       buffers.set(index, buffer);
-      fetched = index + 1;
+      loaded.add(index);
+      while (buffers.size > DECODED_CACHE_CHUNKS) {
+        buffers.delete(buffers.keys().next().value);
+      }
       inFlight = false;
       schedule();
     },
@@ -541,7 +651,7 @@ function browserPlayer({ chunks, sampleRate }) {
   };
 
   function update() {
-    if (!context || stopped || !started) return;
+    if (!context || stopped || finished || !started) return;
     const now = context.currentTime;
     advanceTimeline(now);
     const segment = timeline.length && now >= timeline[0].start ? timeline[0] : null;
@@ -556,11 +666,7 @@ function browserPlayer({ chunks, sampleRate }) {
       const entry =
         entries.find(word => word.end > character) || entries[entries.length - 1];
 
-      if (entry && entry.span !== highlighted) {
-        if (highlighted) highlighted.classList.remove("current");
-        highlighted = entry.span;
-        highlighted.classList.add("current");
-      }
+      highlight(entry);
 
       if (follow.checked && wanted && highlighted) {
         const box = highlighted.getBoundingClientRect();
@@ -570,11 +676,16 @@ function browserPlayer({ chunks, sampleRate }) {
       }
     }
 
+    schedule();
     fetchNext();
     if (scheduled === chunks.length && now >= tail) {
-      stop();
-      button.textContent = "Done";
-      button.disabled = true;
+      finished = true;
+      wanted = false;
+      clearInterval(timer);
+      timer = null;
+      context.suspend().catch(() => {});
+      button.textContent = "Replay";
+      button.disabled = false;
       status.textContent = "Finished reading.";
       return;
     }
@@ -584,10 +695,8 @@ function browserPlayer({ chunks, sampleRate }) {
         ? "Reading chunk " + (playing + 1) + " / " + chunks.length
         : "Buffering…"
       : "Paused";
-    status.textContent = progress + " · " + fetched + " / " + chunks.length + " chunks loaded";
+    status.textContent = progress + " · " + loaded.size + " / " + chunks.length + " chunks loaded";
   }
-
-  const timer = setInterval(update, 100);
 }
 
 try {
