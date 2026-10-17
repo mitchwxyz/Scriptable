@@ -380,11 +380,11 @@ button:active:not(:disabled) { opacity: .75; }
   box-shadow: var(--shadow);
 }
 .player-meta { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
-.status-line { display: flex; flex: 1; align-items: center; gap: 7px; min-width: 0; }
+.status-line { display: flex; flex: 1; align-items: center; gap: 7px; min-width: 0; min-height: 18px; }
 .status-dot { flex: 0 0 5px; height: 5px; border-radius: 50%; background: var(--muted); }
 .player[data-state="pause"] .status-dot { background: var(--accent); }
 .player[data-state="stopped"] .status-dot { background: #e36c63; }
-#status { min-width: 0; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#status { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: nowrap; }
 #position { flex-shrink: 0; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 #progress {
   display: block;
@@ -587,7 +587,23 @@ function browserPlayer({ chunks }) {
   }
 
   function setStatus(message) {
-    if (status.textContent !== message) status.textContent = message;
+    if (status.textContent === message) return;
+    status.textContent = message;
+    fitStatus();
+  }
+
+  function fitStatus() {
+    const available = status.clientWidth;
+    if (!available) return;
+    status.style.fontSize = "12px";
+    if (status.scrollWidth > available) {
+      status.style.fontSize = (12 * (available - 1) / status.scrollWidth) + "px";
+    }
+  }
+
+  fitStatus();
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(fitStatus).observe(status);
   }
 
   reader.textContent = "";
