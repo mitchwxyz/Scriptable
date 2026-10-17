@@ -233,7 +233,7 @@ header {
 }
 
 h1 { margin: 0 0 14px; font-size: 23px; }
-.controls { display: flex; align-items: center; gap: 18px; }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; }
 
 button {
   font: inherit;
@@ -247,6 +247,17 @@ button {
 
 button:disabled { opacity: .55; }
 label { font-size: 15px; }
+
+.speed-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  font-size: 15px;
+}
+
+.speed-controls button { min-width: 44px; min-height: 44px; padding: 8px 14px; }
+#speed { min-width: 48px; text-align: center; font-variant-numeric: tabular-nums; }
 
 #status {
   font-size: 13px;
@@ -286,6 +297,12 @@ p {
     <button id="toggle" type="button">Play</button>
     <label><input id="follow" type="checkbox" checked> Auto-scroll</label>
   </div>
+  <div class="speed-controls" role="group" aria-label="Playback speed">
+    <span>Speed</span>
+    <button id="slower" type="button" aria-label="Decrease speed by 0.1">−</button>
+    <output id="speed" aria-live="polite" aria-atomic="true">1.0×</output>
+    <button id="faster" type="button" aria-label="Increase speed by 0.1">+</button>
+  </div>
   <div id="status" role="status">Tap Play to begin.</div>
 </header>
 <main id="reader">${transcript}</main>
@@ -315,7 +332,12 @@ function browserPlayer({ chunks, sampleRate }) {
   const status = document.getElementById("status");
   const reader = document.getElementById("reader");
   const follow = document.getElementById("follow");
+  const slower = document.getElementById("slower");
+  const faster = document.getElementById("faster");
+  const speed = document.getElementById("speed");
   const PREFETCH_CHUNKS = 3;
+  const MIN_SPEED_STEPS = 5;
+  const MAX_SPEED_STEPS = 30;
 
   reader.textContent = "";
   const words = chunks.map(text => {
@@ -343,6 +365,8 @@ function browserPlayer({ chunks, sampleRate }) {
   let tail = 0;
   let highlighted;
   let inFlight = false;
+  // Store tenths as integers so repeated taps always change speed by exactly 0.1.
+  let speedSteps = 10;
 
   const buffers = new Map();
   const timeline = [];
@@ -358,21 +382,89 @@ function browserPlayer({ chunks, sampleRate }) {
     window.location.href = "reader://chunk/" + fetched;
   }
 
+  function scheduleBuffer(index, buffer, start) {
+    const source = context.createBufferSource();
+    const rate = speedSteps / 10;
+    source.buffer = buffer;
+    source.playbackRate.value = rate;
+    source.connect(context.destination);
+
+    const segment = {
+      i: index, buffer, source, start, rate, offset: 0,
+      end: start + buffer.duration / rate,
+    };
+    timeline.push(segment);
+    source.onended = () => source.disconnect();
+    source.start(start);
+    tail = segment.end;
+  }
+
   function schedule() {
     while (!stopped && context && buffers.has(scheduled)) {
       const buffer = buffers.get(scheduled);
-      const source = context.createBufferSource();
-      source.buffer = buffer;
-      source.connect(context.destination);
-
       const start = Math.max(tail, context.currentTime + 0.06);
-      tail = start + buffer.duration;
-      timeline.push({ i: scheduled, start, end: tail });
-      source.onended = () => source.disconnect();
-      source.start(start);
+      scheduleBuffer(scheduled, buffer, start);
       buffers.delete(scheduled++);
     }
   }
+
+  function advanceTimeline(now) {
+    // Advance even if a timer tick missed entire chunks of playback.
+    while (timeline.length && now >= timeline[0].end) {
+      playing = Math.min(timeline[0].i + 1, chunks.length - 1);
+      timeline.shift();
+    }
+  }
+
+  function updateSpeedControls() {
+    speed.textContent = (speedSteps / 10).toFixed(1) + "×";
+    slower.disabled = stopped || speedSteps === MIN_SPEED_STEPS;
+    faster.disabled = stopped || speedSteps === MAX_SPEED_STEPS;
+  }
+
+  function changeSpeed(delta) {
+    if (stopped) return;
+    const nextSteps = Math.max(
+      MIN_SPEED_STEPS, Math.min(MAX_SPEED_STEPS, speedSteps + delta)
+    );
+    if (nextSteps === speedSteps) return;
+
+    try {
+      speedSteps = nextSteps;
+      if (context) {
+        const now = context.currentTime;
+        const rate = speedSteps / 10;
+        advanceTimeline(now);
+        const current = timeline[0];
+        const active = current && now >= current.start;
+        const pending = timeline.splice(active ? 1 : 0);
+
+        if (active) {
+          // Keep the current source playing from its exact position.
+          current.offset += (now - current.start) * current.rate;
+          current.start = now;
+          current.rate = rate;
+          current.end = now + (current.buffer.duration - current.offset) / rate;
+          current.source.playbackRate.setValueAtTime(rate, now);
+          tail = current.end;
+        } else {
+          tail = Math.max(now, pending.length ? pending[0].start : now);
+        }
+
+        // Future sources have fixed start times: replace them at the new boundaries.
+        for (const segment of pending) segment.source.stop();
+        for (const segment of pending) scheduleBuffer(segment.i, segment.buffer, tail);
+      }
+      updateSpeedControls();
+      update();
+    } catch (error) {
+      fail(error.message);
+    }
+  }
+
+  slower.onclick = () => changeSpeed(-1);
+  faster.onclick = () => changeSpeed(1);
+  updateSpeedControls();
 
   function stop() {
     if (stopped) return;
@@ -381,6 +473,7 @@ function browserPlayer({ chunks, sampleRate }) {
     clearInterval(timer);
     buffers.clear();
     timeline.length = 0;
+    updateSpeedControls();
     if (context) context.close().catch(() => {});
   }
 
@@ -450,17 +543,14 @@ function browserPlayer({ chunks, sampleRate }) {
   function update() {
     if (!context || stopped || !started) return;
     const now = context.currentTime;
-    // Advance past completed chunks even if a timer tick missed their playback.
-    while (timeline.length && now >= timeline[0].end) {
-      playing = Math.min(timeline[0].i + 1, chunks.length - 1);
-      timeline.shift();
-    }
+    advanceTimeline(now);
     const segment = timeline.length && now >= timeline[0].start ? timeline[0] : null;
 
     if (segment) {
       playing = segment.i;
       // Estimated alignment: the API does not provide word timestamps.
-      const fraction = (now - segment.start) / (segment.end - segment.start);
+      const position = segment.offset + (now - segment.start) * segment.rate;
+      const fraction = position / segment.buffer.duration;
       const character = fraction * chunks[playing].length;
       const entries = words[playing];
       const entry =
