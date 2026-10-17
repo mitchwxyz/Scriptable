@@ -4,10 +4,13 @@
 // Store your OpenRouter API key in Keychain as OPENROUTER_TTS_KEY.
 
 const SETTINGS = {
-  model: "elevenlabs/eleven-v4-turbo",
-  voice: "george",
-  chunkCharacters: 2000,
-  timeoutSeconds: 30,
+  // model: "elevenlabs/eleven-v4-turbo", // $20/M
+  // voice: "sarah",
+  model: "fish-audio/s2.1-pro-free:free",
+  voice: "e3cd384158934cc9a01029cd7d278634",
+  speed: 1.3, // Generated speech baseline; displayed as 1.0× in the player.
+  chunkCharacters: 200,
+  timeoutSeconds: 10,
   keychainName: "OPENROUTER_TTS_KEY",
 };
 
@@ -94,6 +97,7 @@ async function speech(text, key) {
   request.body = JSON.stringify({
     model: SETTINGS.model,
     voice: SETTINGS.voice,
+    speed: SETTINGS.speed,
     input: text,
     response_format: "mp3",
   });
