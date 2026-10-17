@@ -211,6 +211,7 @@ function playerHTML(chunks) {
   const payload = JSON.stringify({
     chunks,
   }).replace(/</g, "\\u003c");
+  const wordCount = (chunks.join(" ").match(/\S+/g) || []).length;
 
   return `<!doctype html>
 <html lang="en">
@@ -220,107 +221,309 @@ function playerHTML(chunks) {
       content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Read Text</title>
 <style>
-:root { color-scheme: light dark; }
+:root {
+  color-scheme: light dark;
+  --background: #f6f7f2;
+  --surface: #ffffff;
+  --text: #1e281e;
+  --article: #394337;
+  --muted: #66735f;
+  --line: #e4e8de;
+  --accent: #36552d;
+  --on-accent: #f4faed;
+  --highlight: #e2edcf;
+  --highlight-text: #263e1e;
+  --control: #f6f7f2;
+  --shadow: 0 8px 32px #26351c0a;
+}
 * { box-sizing: border-box; }
+html { background: var(--background); }
 
 body {
-  margin: 0;
+  margin: 0 auto;
+  max-width: 860px;
   height: 100vh;
   height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  font-family: -apple-system, system-ui;
-  background: #faf8f4;
-  color: #252725;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  background: var(--background);
+  color: var(--text);
 }
 
-header {
+.topbar {
   flex: 0 0 auto;
-  padding: 20px;
-  padding-top: max(20px, env(safe-area-inset-top));
-  background: #faf8f4;
-  border-bottom: 1px solid #aaa5;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 22px 24px;
+  padding-top: max(22px, env(safe-area-inset-top));
 }
 
-h1 { margin: 0 0 14px; font-size: 23px; }
-.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; }
+.identity { display: flex; align-items: center; gap: 12px; }
+.app-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  background: var(--highlight);
+  color: var(--accent);
+}
+.app-icon svg { width: 23px; height: 23px; }
+h1 { margin: 0; font-size: 21px; font-weight: 650; letter-spacing: -.65px; }
+.word-count { margin-top: 4px; font-size: 12px; color: var(--muted); }
 
 button {
   font: inherit;
   font-weight: 600;
-  padding: 12px 26px;
   border: 0;
-  border-radius: 24px;
-  background: #285948;
-  color: white;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
+button:disabled { opacity: .3; cursor: default; }
+button:focus-visible, .follow-control input:focus-visible + .switch {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+button:active:not(:disabled) { opacity: .75; }
 
-button:disabled { opacity: .55; }
-label { font-size: 15px; }
-
-.speed-controls {
+.follow-control {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-top: 12px;
-  font-size: 15px;
+  gap: 9px;
+  min-height: 44px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--muted);
+  cursor: pointer;
 }
-
-.speed-controls button { min-width: 44px; min-height: 44px; padding: 8px 14px; }
-#speed { min-width: 48px; text-align: center; font-variant-numeric: tabular-nums; }
-.hint { margin-top: 10px; font-size: 13px; }
-#reader span { cursor: pointer; touch-action: manipulation; }
-#reader span:focus-visible { outline: 2px solid #285948; outline-offset: 2px; }
-
-#status {
-  font-size: 13px;
-  margin-top: 12px;
-  min-height: 32px;
-  white-space: pre-wrap;
+.follow-control input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.switch { width: 28px; height: 18px; border-radius: 12px; background: var(--line); }
+.switch::after {
+  content: "";
+  display: block;
+  width: 12px;
+  height: 12px;
+  margin: 3px;
+  border-radius: 50%;
+  background: var(--surface);
+  transition: transform .15s;
 }
+.follow-control input:checked + .switch { background: var(--accent); }
+.follow-control input:checked + .switch::after { transform: translateX(10px); background: var(--on-accent); }
 
+.reading-heading {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 23px 28px 18px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.reading-heading strong { font-size: 10px; font-weight: 600; letter-spacing: 1.8px; }
 #reader {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  padding: 24px 24px 55vh;
+  padding: 0 28px;
   -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
 }
-
-p {
+#reader::-webkit-scrollbar { display: none; }
+#reader::after { content: ""; display: block; height: 35vh; }
+#reader p {
   max-width: 680px;
   margin: 0 auto 28px;
-  font: 21px/1.85 Georgia, serif;
+  font-size: 21px;
+  font-weight: 400;
+  line-height: 1.85;
+  letter-spacing: -.3px;
+  color: var(--article);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+#reader span { cursor: pointer; touch-action: manipulation; border-radius: 3px; }
+#reader span:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+#reader .current {
+  color: var(--highlight-text);
+  background: var(--highlight);
+  box-shadow: 0 0 0 3px var(--highlight);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
 
-.current { background: #d7eadc; border-radius: 3px; }
+.player-shell {
+  flex: 0 0 auto;
+  padding: 12px 16px max(16px, env(safe-area-inset-bottom));
+}
+.player {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 25px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.player-meta { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.status-line { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.status-dot { flex: 0 0 5px; height: 5px; border-radius: 50%; background: var(--muted); }
+.player[data-state="pause"] .status-dot { background: var(--accent); }
+.player[data-state="stopped"] .status-dot { background: #e36c63; }
+#status { color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+#position { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+#progress {
+  display: block;
+  width: 100%;
+  height: 3px;
+  margin: 13px 0 18px;
+  border: 0;
+  border-radius: 4px;
+  overflow: hidden;
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--line);
+  color: var(--accent);
+}
+#progress::-webkit-progress-bar { background: var(--line); border-radius: 4px; }
+#progress::-webkit-progress-value { background: var(--accent); border-radius: 4px; }
+#progress::-moz-progress-bar { background: var(--accent); border-radius: 4px; }
+.playback-controls { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 
+.speed-controls {
+  display: flex;
+  align-items: center;
+  height: 52px;
+  padding: 3px;
+  border-radius: 17px;
+  background: var(--control);
+  border: 1px solid var(--line);
+}
+.speed-controls button { width: 44px; height: 44px; border-radius: 12px; background: transparent; color: var(--text); font-size: 20px; font-weight: 400; }
+#speed { min-width: 48px; text-align: center; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); }
+#toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-width: 126px;
+  height: 52px;
+  padding: 0 20px;
+  border-radius: 17px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 14px;
+  font-weight: 650;
+}
+#toggle::before { content: ""; width: 14px; height: 16px; background: currentColor; clip-path: polygon(15% 0, 100% 50%, 15% 100%); }
+#toggle[data-state="pause"]::before { width: 12px; clip-path: none; background: linear-gradient(to right, currentColor 0 34%, transparent 34% 66%, currentColor 66% 100%); }
+#toggle[data-state="replay"]::before { content: "↻"; background: none; clip-path: none; width: 18px; height: 24px; font-size: 24px; line-height: 24px; }
+#toggle[data-state="stopped"]::before { width: 12px; height: 12px; clip-path: none; }
+
+@media (max-width: 360px) {
+  .topbar { padding-left: 20px; padding-right: 20px; }
+  .identity { gap: 9px; }
+  .app-icon { width: 36px; height: 36px; border-radius: 12px; }
+  h1 { font-size: 19px; }
+  .follow-control { gap: 6px; padding: 0 9px; }
+  #reader { padding-left: 24px; padding-right: 24px; }
+  .reading-heading { padding-left: 24px; padding-right: 24px; }
+  .player-shell { padding-left: 12px; padding-right: 12px; }
+  .player { padding: 16px; }
+  .playback-controls { gap: 10px; }
+  .speed-controls button { width: 40px; }
+  #speed { min-width: 40px; }
+  #toggle { min-width: 104px; padding: 0 12px; }
+}
+@media (min-width: 600px) {
+  .topbar { padding: 28px 40px; }
+  .reading-heading { padding: 28px 40px 20px; }
+  #reader { padding-left: 40px; padding-right: 40px; }
+  #reader p { font-size: 24px; }
+}
+@media (max-height: 500px) {
+  .topbar { padding: 12px 24px; }
+  .app-icon { width: 32px; height: 32px; border-radius: 10px; }
+  .app-icon svg { width: 20px; height: 20px; }
+  h1 { font-size: 18px; }
+  .word-count { display: none; }
+  .reading-heading { padding: 8px 28px 10px; }
+  #reader p { font-size: 18px; line-height: 1.7; }
+  .player-shell { padding: 8px 16px max(8px, env(safe-area-inset-bottom)); }
+  .player { padding: 12px 16px; border-radius: 20px; }
+  #progress { margin: 8px 0 10px; }
+  .speed-controls, #toggle { height: 44px; border-radius: 14px; }
+  .speed-controls { padding: 0; }
+  .speed-controls button { height: 42px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .switch::after { transition: none; }
+}
 @media (prefers-color-scheme: dark) {
-  body, header { background: #191d1b; color: #e7e8e3; }
-  .current { background: #365847; }
+  :root {
+    --background: #10130f;
+    --surface: #1a1f18;
+    --text: #edf2e7;
+    --article: #d0d8c9;
+    --muted: #8e9a85;
+    --line: #2b3327;
+    --accent: #d1e7ae;
+    --on-accent: #26351b;
+    --highlight: #33452a;
+    --highlight-text: #e4f4d2;
+    --control: #151a13;
+    --shadow: 0 8px 32px #00000024;
+  }
 }
 </style>
 </head>
 <body>
-<header>
-  <h1>Read Text</h1>
-  <div class="controls">
-    <button id="toggle" type="button">Play</button>
-    <label><input id="follow" type="checkbox" checked> Auto-scroll</label>
+<header class="topbar">
+  <div class="identity">
+    <div class="app-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 14v-3a8 8 0 0 1 16 0v3"/>
+        <rect x="3" y="12" width="4" height="8" rx="2"/>
+        <rect x="17" y="12" width="4" height="8" rx="2"/>
+      </svg>
+    </div>
+    <div><h1>Read Text</h1><div class="word-count">${wordCount.toLocaleString()} words</div></div>
   </div>
-  <div class="speed-controls" role="group" aria-label="Playback speed">
-    <span>Speed</span>
-    <button id="slower" type="button" aria-label="Decrease speed by 0.1">−</button>
-    <output id="speed" aria-live="polite" aria-atomic="true">1.0×</output>
-    <button id="faster" type="button" aria-label="Increase speed by 0.1">+</button>
-  </div>
-  <div class="hint">Tap a word to jump there. Position is approximate.</div>
-  <div id="status" role="status">Tap Play or a word to begin.</div>
+  <label class="follow-control">
+    <span>Follow</span>
+    <input id="follow" type="checkbox" aria-label="Automatically follow the spoken text" checked>
+    <span class="switch" aria-hidden="true"></span>
+  </label>
 </header>
-<main id="reader">${transcript}</main>
+<div class="reading-heading"><strong>TRANSCRIPT</strong><span>Tap a word to jump</span></div>
+<main id="reader" aria-label="Transcript. Tap a word to jump to its approximate audio position.">${transcript}</main>
+<footer class="player-shell">
+  <section id="player" class="player" data-state="play" aria-label="Audio player">
+    <div class="player-meta">
+      <div class="status-line"><span class="status-dot" aria-hidden="true"></span><span id="status" role="status">Ready when you are</span></div>
+      <span id="position" aria-hidden="true">0%</span>
+    </div>
+    <progress id="progress" max="1" value="0" aria-label="Estimated reading progress"></progress>
+    <div class="playback-controls">
+      <div class="speed-controls" role="group" aria-label="Playback speed">
+        <button id="slower" type="button" aria-label="Decrease speed by 0.1">−</button>
+        <output id="speed" aria-live="polite" aria-atomic="true">1.0×</output>
+        <button id="faster" type="button" aria-label="Increase speed by 0.1">+</button>
+      </div>
+      <button id="toggle" type="button" data-state="play" aria-label="Play">Play</button>
+    </div>
+  </section>
+</footer>
 <script>
 function reportPlayerError(message) {
   const text = "Player error: " + String(message);
@@ -350,10 +553,38 @@ function browserPlayer({ chunks }) {
   const slower = document.getElementById("slower");
   const faster = document.getElementById("faster");
   const speed = document.getElementById("speed");
+  const player = document.getElementById("player");
+  const progress = document.getElementById("progress");
+  const position = document.getElementById("position");
   const PREFETCH_CHUNKS = 3;
   const DECODED_CACHE_CHUNKS = 6;
   const MIN_SPEED_STEPS = 5;
   const MAX_SPEED_STEPS = 30;
+  let totalCharacters = 0;
+  const chunkStarts = chunks.map(text => {
+    const start = totalCharacters;
+    totalCharacters += text.length;
+    return start;
+  });
+
+  function setProgress(index, character) {
+    const fraction = totalCharacters
+      ? Math.min(1, Math.max(0, (chunkStarts[index] + character) / totalCharacters))
+      : 0;
+    progress.value = fraction;
+    position.textContent = Math.floor(fraction * 100) + "%";
+  }
+
+  function setPlayLabel(label) {
+    button.textContent = label;
+    button.setAttribute("data-state", label.toLowerCase());
+    button.setAttribute("aria-label", label === "Replay" ? "Replay from beginning" : label);
+    player.setAttribute("data-state", label.toLowerCase());
+  }
+
+  function setStatus(message) {
+    if (status.textContent !== message) status.textContent = message;
+  }
 
   reader.textContent = "";
   const words = chunks.map((text, index) => {
@@ -400,7 +631,6 @@ function browserPlayer({ chunks }) {
   let speedSteps = 10;
 
   const buffers = new Map();
-  const loaded = new Set();
   const timeline = [];
 
   function fetchNext() {
@@ -453,6 +683,7 @@ function browserPlayer({ chunks }) {
     while (timeline.length && now >= timeline[0].end) {
       playing = Math.min(timeline[0].i + 1, chunks.length - 1);
       timeline.shift();
+      setProgress(playing, 0);
     }
   }
 
@@ -544,6 +775,7 @@ function browserPlayer({ chunks }) {
     tail = context.currentTime;
     pendingSeek = { index, fraction: character / chunks[index].length };
     highlight(words[index].find(word => word.end > character));
+    setProgress(index, character);
   }
 
   async function seek(index, character) {
@@ -555,7 +787,7 @@ function browserPlayer({ chunks }) {
       resetPosition(index, character);
       started = true;
       wanted = shouldPlay;
-      button.textContent = wanted ? "Pause" : "Play";
+      setPlayLabel(wanted ? "Pause" : "Play");
       button.disabled = false;
       // Resume within the tap handler to satisfy iOS's user gesture requirement.
       await (wanted ? context.resume() : context.suspend());
@@ -585,8 +817,8 @@ function browserPlayer({ chunks }) {
     if (token !== undefined && token !== requestToken) return;
     stop();
     button.disabled = true;
-    button.textContent = "Stopped";
-    status.textContent = String(message);
+    setPlayLabel("Stopped");
+    setStatus(String(message));
   }
 
   button.onclick = async () => {
@@ -610,7 +842,7 @@ function browserPlayer({ chunks }) {
         schedule();
         fetchNext();
       }
-      if (!stopped) button.textContent = wanted ? "Pause" : "Play";
+      if (!stopped) setPlayLabel(wanted ? "Pause" : "Play");
     } catch (error) {
       if (!stopped && version === seekVersion) fail(error.message);
     } finally {
@@ -633,7 +865,6 @@ function browserPlayer({ chunks }) {
       if (!buffer.length) throw new Error("The API returned empty audio.");
 
       buffers.set(index, buffer);
-      loaded.add(index);
       while (buffers.size > DECODED_CACHE_CHUNKS) {
         buffers.delete(buffers.keys().next().value);
       }
@@ -656,6 +887,7 @@ function browserPlayer({ chunks }) {
       const position = segment.offset + (now - segment.start) * segment.rate;
       const fraction = position / segment.buffer.duration;
       const character = fraction * chunks[playing].length;
+      setProgress(playing, character);
       const entries = words[playing];
       const entry =
         entries.find(word => word.end > character) || entries[entries.length - 1];
@@ -678,18 +910,14 @@ function browserPlayer({ chunks }) {
       clearInterval(timer);
       timer = null;
       context.suspend().catch(() => {});
-      button.textContent = "Replay";
+      setPlayLabel("Replay");
       button.disabled = false;
-      status.textContent = "Finished reading.";
+      setProgress(chunks.length - 1, chunks[chunks.length - 1].length);
+      setStatus("Finished reading.");
       return;
     }
 
-    const progress = wanted
-      ? segment
-        ? "Reading chunk " + (playing + 1) + " / " + chunks.length
-        : "Buffering…"
-      : "Paused";
-    status.textContent = progress + " · " + loaded.size + " / " + chunks.length + " chunks loaded";
+    setStatus(wanted ? segment ? "Reading" : "Loading audio…" : "Paused");
   }
 }
 
